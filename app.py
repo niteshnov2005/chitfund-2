@@ -242,9 +242,17 @@ def get_excel_data(sheet_name=None):
                         db_entry = paid_db.get(item_id)
                         item_is_paid = False
                         item_paid_date = None
+                        item_paid_amount = 0
+                        
                         if db_entry:
-                            item_is_paid = True
-                            if isinstance(db_entry, str): item_paid_date = db_entry
+                            if isinstance(db_entry, dict):
+                                item_paid_amount = db_entry.get('amount', 0)
+                                item_paid_date = db_entry.get('date')
+                                item_is_paid = item_paid_amount >= amt
+                            else:
+                                item_is_paid = True
+                                item_paid_amount = amt
+                                if isinstance(db_entry, str): item_paid_date = db_entry
 
                         curr_member['items'].append({
                             'month': month_label,
@@ -253,6 +261,7 @@ def get_excel_data(sheet_name=None):
                             'amount': amt,
                             'id': item_id,
                             'is_paid': item_is_paid,
+                            'paid_amount': item_paid_amount,
                             'paid_date': item_paid_date
                         })
                         
@@ -274,12 +283,31 @@ def get_excel_data(sheet_name=None):
     # --- STEP 4: RE-CALCULATE MEMBER TOTALS with Partial Logic ---
     final_list = []
     
+    from datetime import datetime
     for m in members_list:
         if m['items']:
             # Calculate total from items to be safe
             m['total'] = sum(i['amount'] for i in m['items'])
-            m['paid_amount'] = sum(i['amount'] for i in m['items'] if i['is_paid'])
+            m['paid_amount'] = sum(i['paid_amount'] for i in m['items'])
             m['is_paid'] = (m['paid_amount'] >= m['total']) and (m['total'] > 0)
+            
+            # Find the latest payment date
+            latest_date_str = None
+            latest_date_obj = None
+            for i in m['items']:
+                date_str = i.get('paid_date')
+                if date_str:
+                    try:
+                        # Format is typically "%d %b, %I:%M %p" e.g. "01 Mar, 08:43 PM"
+                        d_obj = datetime.strptime(date_str, "%d %b, %I:%M %p")
+                        if not latest_date_obj or d_obj > latest_date_obj:
+                            latest_date_obj = d_obj
+                            latest_date_str = date_str
+                    except Exception:
+                        # Fallback for old custom strings
+                        latest_date_str = date_str
+            m['paid_date'] = latest_date_str
+
         else:
             # Fallback for members without items
             m['paid_amount'] = m['total'] if m['is_paid'] else 0
@@ -541,6 +569,62 @@ def get_sheets_api():
     return jsonify({'sheets': get_all_sheet_names()}) if 'user' in session else (jsonify({"error": "Unauthorized"}), 401)
 
 # --- EXCEL EDITOR API ---
+import re
+from openpyxl.utils.cell import coordinate_to_tuple
+
+import re
+from openpyxl.utils.cell import coordinate_to_tuple
+
+def evaluate_vlookup(val_str, ws, ws_data):
+    pattern = r'=VLOOKUP\((?:CONCATENATE\(([A-Z]+)([0-9]+)\s*,\s*\"\|\"\s*,\s*([A-Z]+)([0-9]+)\)|([A-Z]+)([0-9]+)\s*\&\s*\"\|\"\s*\&\s*([A-Z]+)([0-9]+))\s*,\s*\$?([A-Z]+)\$?([0-9]+):\$?([A-Z]+)\$?([0-9]+)\s*,\s*2\s*,\s*FALSE\)'
+    match = re.search(pattern, val_str)
+    
+    if not match: return val_str
+    groups = match.groups()
+    
+    if groups[0] is not None:
+        col1, row1, col2, row2 = groups[0], groups[1], groups[2], groups[3]
+    else:
+        col1, row1, col2, row2 = groups[4], groups[5], groups[6], groups[7]
+        
+    start_col, start_row, end_col, end_row = groups[8], groups[9], groups[10], groups[11]
+    
+    # 1. Get search key from DATA sheet (evaluated values)
+    part1 = ws_data[f"{col1}{row1}"].value
+    part2 = ws_data[f"{col2}{row2}"].value
+    
+    # Use fallback to ws if somehow None in ws_data
+    if part1 is None: part1 = ws[f"{col1}{row1}"].value
+    if part2 is None: part2 = ws[f"{col2}{row2}"].value
+    
+    if part1 is None: part1 = ""
+    if part2 is None: part2 = ""
+    
+    # Handle float formatting differences (e.g. 1.0 vs 1)
+    def format_part(p):
+        try:
+            f = float(p)
+            if f.is_integer(): return str(int(f))
+            return str(f)
+        except: return str(p).strip()
+        
+    search_key = f"{format_part(part1)}|{format_part(part2)}"
+    
+    # 2. Iterate lookup range on DATA sheet
+    start_r, start_c = coordinate_to_tuple(f"{start_col}{start_row}")
+    end_r, end_c = coordinate_to_tuple(f"{end_col}{end_row}")
+    
+    for r in range(start_r, end_r + 1):
+        lookup_val = ws_data.cell(row=r, column=start_c).value
+        if lookup_val is not None:
+            # Format lookup val string just in case
+            if format_part(lookup_val) == search_key:
+                res = ws_data.cell(row=r, column=start_c + 1).value
+                return res if res is not None else ""
+            
+    return "#N/A" # Default if not found
+
+
 @app.route('/api/sheet_data')
 def get_sheet_data_api():
     if 'user' not in session: return jsonify({'error': 'Unauthorized'}), 401
@@ -548,21 +632,32 @@ def get_sheet_data_api():
     if not sheet_name: return jsonify({'error': 'No sheet name'}), 400
     
     try:
-        # Load with data_only=True to evaluate formulas so frontend doesn't show NA
-        wb = openpyxl.load_workbook(FILE_NAME, data_only=True)
+        # Load twice: Once for formulas, once for values
+        wb = openpyxl.load_workbook(FILE_NAME)
+        wb_data = openpyxl.load_workbook(FILE_NAME, data_only=True)
+        
         if sheet_name not in wb.sheetnames: return jsonify({'error': 'Sheet not found'}), 404
         ws = wb[sheet_name]
+        ws_data = wb_data[sheet_name]
         
         data = []
-        for row in ws.iter_rows(values_only=True):
+        for r_idx, row in enumerate(ws.iter_rows(values_only=False), 1):
             clean_row = []
-            for cell in row:
-                if cell is None: clean_row.append("")
-                elif isinstance(cell, datetime): clean_row.append(cell.strftime('%Y-%m-%d'))
-                else: clean_row.append(str(cell))
+            for c_idx, cell in enumerate(row, 1):
+                cv = cell.value
+                if cv is None: clean_row.append("")
+                elif isinstance(cv, datetime): clean_row.append(cv.strftime('%Y-%m-%d'))
+                else: 
+                    val_str = str(cv)
+                    if val_str.startswith("=VLOOKUP"):
+                        ev = evaluate_vlookup(val_str, ws, ws_data)
+                        clean_row.append(ev)
+                    else:
+                        clean_row.append(val_str)
             data.append(clean_row)
             
         wb.close()
+        wb_data.close()
         return jsonify({'data': data})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -640,21 +735,34 @@ def save_sheet_data_api():
 def toggle_pay():
     if 'user' not in session: return jsonify({'error': 'Unauthorized'}), 401
     item_id = request.json.get('id')
+    amount = request.json.get('amount') # New parameter
     if not item_id: return jsonify({'error': 'No ID'}), 400
+    
     db = load_paid_db()
-    current_entry = db.get(item_id)
-    if current_entry:
-        del db[item_id]
-        new_status = False
-        paid_on = None
+    now = datetime.now().strftime("%d %b, %I:%M %p")
+    
+    if amount is not None:
+        # Custom amount updated
+        amt_float = float(amount)
+        if amt_float <= 0:
+            if item_id in db: del db[item_id]
+        else:
+            db[item_id] = {'amount': amt_float, 'date': now}
+        save_paid_db(db)
+        return jsonify({'success': True, 'paid_on': now})
     else:
-        # Changed: Use local server time instead of UTC to fix user reported time mistake.
-        now = datetime.now().strftime("%d %b, %I:%M %p")
-        db[item_id] = now
-        new_status = True
-        paid_on = now
-    save_paid_db(db)
-    return jsonify({'success': True, 'new_status': new_status, 'paid_on': paid_on})
+        # Legacy toggle logic for backwards compatibility
+        current_entry = db.get(item_id)
+        if current_entry:
+            del db[item_id]
+            new_status = False
+            paid_on = None
+        else:
+            db[item_id] = now
+            new_status = True
+            paid_on = now
+        save_paid_db(db)
+        return jsonify({'success': True, 'new_status': new_status, 'paid_on': paid_on})
 
 @app.route('/download_excel')
 def download_excel():
