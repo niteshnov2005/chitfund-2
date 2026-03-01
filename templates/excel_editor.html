@@ -110,6 +110,7 @@
 
     <script>
         let mySpreadsheet = null;
+        let pendingChanges = [];
 
         // 1. Load Sheets
         fetch('/api/sheets')
@@ -132,6 +133,7 @@
         function loadSheet() {
             const sheet = document.getElementById('sheetSelect').value;
             document.getElementById('spreadsheet').innerHTML = 'Loading...';
+            pendingChanges = [];
 
             fetch(`/api/sheet_data?sheet=${encodeURIComponent(sheet)}`)
                 .then(res => res.json())
@@ -148,8 +150,11 @@
                         tableOverflow: true,
                         tableWidth: '100%', // Enable horizontal scrolling
                         tableHeight: '80vh', // Adjust height
-                        parseFormulas: true, // Enable formula calculation
+                        parseFormulas: false, // Use backend evaluated values directly
                         wordWrap: true,
+                        onchange: function (instance, cell, x, y, value) {
+                            pendingChanges.push({ x: parseInt(x), y: parseInt(y), value: value });
+                        }
                     });
                 })
                 .catch(err => {
@@ -211,27 +216,18 @@
             status.className = 'status-saving';
 
             const sheet = document.getElementById('sheetSelect').value;
-            // Pass (false, true) to getData to retrieve FORMULAS instead of calculated values
-            // arg1: onlyHighlighted (false), arg2: processed/formulas (true? check docs/behavior)
-            // Actually in v4: getData(highlighted, processed)
-            // If parsed/processed=false, maybe it gives raw?
-            // Let's try getData(false, false) which might be default? 
-            // Wait, docs say: "processed: boolean - Get the raw data. Default: false"
-            // So if default is false, it should give raw. ??
-            // Let's try getJson() or just iterate to be safe?
-            // Actually, simply: data = mySpreadsheet.getData(false, true) is often cited.
-            const data = mySpreadsheet.getData(false, false);
 
             fetch('/api/save_sheet_data', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sheet_name: sheet, data: data })
+                body: JSON.stringify({ sheet_name: sheet, changes: pendingChanges })
             })
                 .then(res => res.json())
                 .then(res => {
                     if (res.success) {
                         status.innerText = 'All changes saved!';
                         status.className = 'status-saved';
+                        pendingChanges = [];
                         setTimeout(() => status.innerText = '', 3000);
                     } else {
                         status.innerText = 'Error: ' + res.error;

@@ -548,16 +548,13 @@ def get_sheet_data_api():
     if not sheet_name: return jsonify({'error': 'No sheet name'}), 400
     
     try:
-        wb = openpyxl.load_workbook(FILE_NAME, data_only=False) # Get formulas if possible? No, for editing we want values usually, or raw? Jspreadsheet edits values.
-        # Actually data_only=False is better to edit formulas, but for this use case (simple data entry), values are fine. 
-        # But if we write back values, we lose formulas.
-        # Let's stick to data_only=False to read/write what is there.
+        # Load with data_only=True to evaluate formulas so frontend doesn't show NA
+        wb = openpyxl.load_workbook(FILE_NAME, data_only=True)
         if sheet_name not in wb.sheetnames: return jsonify({'error': 'Sheet not found'}), 404
         ws = wb[sheet_name]
         
         data = []
         for row in ws.iter_rows(values_only=True):
-            # cell values can be None, datetime, etc. Convert to friendly formats
             clean_row = []
             for cell in row:
                 if cell is None: clean_row.append("")
@@ -604,36 +601,32 @@ def save_sheet_data_api():
     try:
         req = request.json
         sheet_name = req.get('sheet_name')
-        data = req.get('data') # 2D array
+        changes = req.get('changes')
         
-        if not sheet_name or not data: return jsonify({'error': 'Missing data'}), 400
+        if not sheet_name or changes is None: return jsonify({'error': 'Missing data or changes'}), 400
         
         wb = openpyxl.load_workbook(FILE_NAME)
         if sheet_name not in wb.sheetnames: return jsonify({'error': 'Sheet not found'}), 404
         ws = wb[sheet_name]
         
-        # We only update cells provided in 'data'. 
-        # CAUTION: 'data' from Jspreadsheet might be the whole sheet or specific changes.
-        # Ideally we expect the whole sheet data back to rewrite it? 
-        # Jspreadsheet .getData() returns the whole grid.
-        
-        for r_idx, row in enumerate(data):
-            for c_idx, val in enumerate(row):
-                # r_idx+1, c_idx+1 because openpyxl is 1-based
-                # Try to preserve types if possible? Everything is str from JSON.
-                # Try converting to int/float if it looks like one
-                clean_val = val
-                if isinstance(val, str):
-                    val = val.strip()
-                    if val.replace('.','',1).isdigit():
-                        try:
-                            if '.' in val: clean_val = float(val)
-                            else: clean_val = int(val)
-                        except: clean_val = val
-                    elif val == "":
-                        clean_val = None
-                
-                ws.cell(row=r_idx+1, column=c_idx+1, value=clean_val)
+        # Process individual cell changes only, preserving other formulas
+        for change in changes:
+            r_idx = int(change.get('y', 0))
+            c_idx = int(change.get('x', 0))
+            val = change.get('value', "")
+            
+            clean_val = val
+            if isinstance(val, str):
+                val = val.strip()
+                if val.replace('.','',1).isdigit():
+                    try:
+                        if '.' in val: clean_val = float(val)
+                        else: clean_val = int(val)
+                    except: clean_val = val
+                elif val == "":
+                    clean_val = None
+            
+            ws.cell(row=r_idx+1, column=c_idx+1, value=clean_val)
                 
         wb.save(FILE_NAME)
         wb.close()
