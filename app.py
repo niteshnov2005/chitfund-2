@@ -615,11 +615,20 @@ def evaluate_vlookup(val_str, ws, ws_data):
     end_r, end_c = coordinate_to_tuple(f"{end_col}{end_row}")
     
     for r in range(start_r, end_r + 1):
-        lookup_val = ws_data.cell(row=r, column=start_c).value
-        if lookup_val is not None:
-            # Format lookup val string just in case
-            if format_part(lookup_val) == search_key:
+        # Dynamically evaluate the lookup key from L (12) and M (13) to avoid stale openpyxl cache
+        l_val = ws_data.cell(row=r, column=12).value
+        m_val = ws_data.cell(row=r, column=13).value
+        
+        # Fallback to raw ws in case ws_data is None
+        if l_val is None: l_val = ws.cell(row=r, column=12).value
+        if m_val is None: m_val = ws.cell(row=r, column=13).value
+        
+        if l_val is not None and m_val is not None:
+            lookup_key = f"{format_part(l_val)}|{format_part(m_val)}"
+            if lookup_key == search_key:
                 res = ws_data.cell(row=r, column=start_c + 1).value
+                # Fallback to raw ws in case cached value is not in ws_data
+                if res is None: res = ws.cell(row=r, column=start_c + 1).value
                 return res if res is not None else ""
             
     return "#N/A" # Default if not found
