@@ -9,7 +9,8 @@ sys.path.append(os.getcwd())
 from app import get_excel_data
 
 try:
-    data = get_excel_data()
+    res = get_excel_data()
+    data = res['members'] if isinstance(res, dict) else res
     print(f"Successfully retrieved {len(data)} members.")
     if len(data) > 0:
         print("First member sample:", data[0])

@@ -769,7 +769,11 @@ def download_excel():
     if 'user' not in session: return redirect(url_for('login_page'))
     
     # 1. Get processed data
-    members = get_excel_data() 
+    data_response = get_excel_data()
+    if isinstance(data_response, dict):
+        members = data_response.get('members', [])
+    else:
+        members = data_response 
     
     # 2. Create Workbook using openpyxl directly for formatting
     from openpyxl import Workbook
